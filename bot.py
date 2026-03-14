@@ -191,16 +191,25 @@ def send_message(to: str, text: str):
 
 
 ADMIN_INTENT_PROMPT = """You are a command classifier for a WhatsApp bot admin.
-Given an admin message, return ONLY one of these exact keywords if the intent matches, otherwise return 'none':
-- reboot       (wants to restart/reboot the bot)
-- stats        (wants usage stats, user counts, cost info)
-- clearall     (wants to clear all conversation histories)
-- addrule      (wants to add a new rule/instruction — extract the rule text after a colon, e.g. "addrule: <rule>")
-- setbudget    (wants to change the user budget — extract amount after a colon, e.g. "setbudget: <amount>")
-- adminhelp    (wants to see admin commands)
-- none         (not an admin command)
+Given an admin message, identify the intent and respond in EXACTLY the format shown below. Nothing else.
 
-For addrule and setbudget, respond in the format: addrule: <rule text> or setbudget: <amount>
+Intents:
+- reboot       → respond: reboot
+- stats / usage / how many users → respond: stats
+- clear all histories → respond: clearall
+- add a rule / add rule that / make the bot say / instruct the bot → respond: addrule: <extract the full rule text>
+- set budget / change budget → respond: setbudget: <amount>
+- admin help / show commands → respond: adminhelp
+- anything else → respond: none
+
+Examples:
+"can you reboot yourself" → reboot
+"how many users chatted so far" → stats
+"add rule that if someone asks X say Y" → addrule: if someone asks X say Y
+"make the bot always reply in Tamil" → addrule: always reply in Tamil
+"set user budget to 5" → setbudget: 5
+"what is 2+2" → none
+
 Only respond with the keyword or keyword: value. Nothing else."""
 
 
@@ -243,8 +252,8 @@ def handle_admin_command(cmd: str) -> str:
         conversation_history.clear()
         return "🗑️ All conversation histories cleared."
 
-    if cmd.startswith("addrule "):
-        new_rule = cmd[len("addrule "):].strip()
+    if cmd.startswith("addrule:") or cmd.startswith("addrule "):
+        new_rule = cmd[len("addrule"):].lstrip(": ").strip()
         if not new_rule:
             return "Usage: addrule <rule text>"
         prompt_file = SCRIPT_DIR / "system_prompt.txt"
@@ -254,13 +263,13 @@ def handle_admin_command(cmd: str) -> str:
         SYSTEM_PROMPT = load_system_prompt()
         return f"✅ Rule added: {new_rule}"
 
-    if cmd.startswith("setbudget "):
-        parts = cmd.split()
-        if len(parts) != 2:
+    if cmd.startswith("setbudget:") or cmd.startswith("setbudget "):
+        parts = cmd[len("setbudget"):].lstrip(": ").strip().split()
+        if len(parts) != 1:
             return "Usage: setbudget <amount>"
         try:
             global USER_BUDGET
-            USER_BUDGET = float(parts[1])
+            USER_BUDGET = float(parts[0])
             return f"✅ User budget set to ${USER_BUDGET:.2f}"
         except ValueError:
             return "❌ Invalid amount."
