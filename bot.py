@@ -1,5 +1,7 @@
 import os
+import sys
 import json
+import threading
 from pathlib import Path
 from collections import defaultdict
 from datetime import datetime
@@ -17,6 +19,7 @@ PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 MAX_HISTORY = 20
+ADMIN_NUMBER = "916380157944"
 
 client = Anthropic(api_key=ANTHROPIC_API_KEY)
 app = Flask(__name__)
@@ -186,6 +189,68 @@ def send_message(to: str, text: str):
     print("WhatsApp API response:", r.status_code, r.text)
 
 
+def handle_admin_command(cmd: str) -> str:
+    cmd = cmd.strip().lower()
+
+    if cmd == "reboot":
+        send_message(ADMIN_NUMBER, "🔄 Rebooting bot...")
+        threading.Timer(1.0, lambda: os.execv(sys.executable, [sys.executable] + sys.argv)).start()
+        return "Reboot initiated."
+
+    if cmd == "stats":
+        usage = load_usage()
+        if not usage:
+            return "📊 No usage data yet."
+        lines = ["📊 *Usage Stats*\n"]
+        total_cost = 0.0
+        for number, u in usage.items():
+            cost = (u.get("input_tokens", 0) * INPUT_COST_PER_TOKEN
+                    + u.get("output_tokens", 0) * OUTPUT_COST_PER_TOKEN)
+            total_cost += cost
+            lines.append(f"• {number}: ${cost:.4f} ({u.get('input_tokens',0)}in / {u.get('output_tokens',0)}out)")
+        lines.append(f"\n💰 Total: ${total_cost:.4f}")
+        return "\n".join(lines)
+
+    if cmd == "clearall":
+        conversation_history.clear()
+        return "🗑️ All conversation histories cleared."
+
+    if cmd.startswith("addrule "):
+        new_rule = cmd[len("addrule "):].strip()
+        if not new_rule:
+            return "Usage: addrule <rule text>"
+        prompt_file = SCRIPT_DIR / "system_prompt.txt"
+        with open(prompt_file, "a", encoding="utf-8") as f:
+            f.write(f"\n- {new_rule}")
+        global SYSTEM_PROMPT
+        SYSTEM_PROMPT = load_system_prompt()
+        return f"✅ Rule added: {new_rule}"
+
+    if cmd.startswith("setbudget "):
+        parts = cmd.split()
+        if len(parts) != 2:
+            return "Usage: setbudget <amount>"
+        try:
+            global USER_BUDGET
+            USER_BUDGET = float(parts[1])
+            return f"✅ User budget set to ${USER_BUDGET:.2f}"
+        except ValueError:
+            return "❌ Invalid amount."
+
+    if cmd == "adminhelp":
+        return (
+            "🔧 *Admin Commands*\n\n"
+            "• *reboot* — restart the bot\n"
+            "• *stats* — show usage & cost per user\n"
+            "• *clearall* — clear all conversation histories\n"
+            "• *addrule <text>* — append a rule to system prompt\n"
+            "• *setbudget <amount>* — change per-user USD budget\n"
+            "• *adminhelp* — show this menu"
+        )
+
+    return None  # not an admin command
+
+
 @app.route("/webhook", methods=["GET"])
 def verify():
     mode = request.args.get("hub.mode")
@@ -231,6 +296,12 @@ def webhook():
 
         print(f"User: {sender}")
         print(f"Message: {user_text}")
+
+        if sender == ADMIN_NUMBER:
+            admin_reply = handle_admin_command(user_text)
+            if admin_reply is not None:
+                send_message(sender, admin_reply)
+                return "ok", 200
 
         if user_text.strip().lower() == "reset":
             conversation_history.pop(sender, None)
