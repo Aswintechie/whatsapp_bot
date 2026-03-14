@@ -78,6 +78,7 @@ def log_message(sender: str, role: str, text: str):
         f.write(f"[{timestamp}] [{role}] {text}\n")
 
 conversation_history: dict[str, list[dict]] = defaultdict(list)
+_reboot_pending = False
 
 QUICK_REPLIES = {
     "hi": (
@@ -189,13 +190,40 @@ def send_message(to: str, text: str):
     print("WhatsApp API response:", r.status_code, r.text)
 
 
+ADMIN_INTENT_PROMPT = """You are a command classifier for a WhatsApp bot admin.
+Given an admin message, return ONLY one of these exact keywords if the intent matches, otherwise return 'none':
+- reboot       (wants to restart/reboot the bot)
+- stats        (wants usage stats, user counts, cost info)
+- clearall     (wants to clear all conversation histories)
+- addrule      (wants to add a new rule/instruction — extract the rule text after a colon, e.g. "addrule: <rule>")
+- setbudget    (wants to change the user budget — extract amount after a colon, e.g. "setbudget: <amount>")
+- adminhelp    (wants to see admin commands)
+- none         (not an admin command)
+
+For addrule and setbudget, respond in the format: addrule: <rule text> or setbudget: <amount>
+Only respond with the keyword or keyword: value. Nothing else."""
+
+
+def detect_admin_intent(text: str) -> str:
+    response = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=50,
+        system=ADMIN_INTENT_PROMPT,
+        messages=[{"role": "user", "content": text}],
+    )
+    return response.content[0].text.strip().lower()
+
+
 def handle_admin_command(cmd: str) -> str:
     cmd = cmd.strip().lower()
 
     if cmd == "reboot":
-        send_message(ADMIN_NUMBER, "🔄 Rebooting bot...")
-        threading.Timer(1.0, lambda: os.execv(sys.executable, [sys.executable] + sys.argv)).start()
-        return "Reboot initiated."
+        global _reboot_pending
+        if _reboot_pending:
+            return None
+        _reboot_pending = True
+        threading.Timer(3.0, lambda: os.execv(sys.executable, [sys.executable] + sys.argv)).start()
+        return "🔄 Rebooting bot..."
 
     if cmd == "stats":
         usage = load_usage()
@@ -298,10 +326,12 @@ def webhook():
         print(f"Message: {user_text}")
 
         if sender == ADMIN_NUMBER:
-            admin_reply = handle_admin_command(user_text)
-            if admin_reply is not None:
-                send_message(sender, admin_reply)
-                return "ok", 200
+            intent = detect_admin_intent(user_text)
+            if intent != "none":
+                admin_reply = handle_admin_command(intent)
+                if admin_reply is not None:
+                    send_message(sender, admin_reply)
+                    return "ok", 200
 
         if user_text.strip().lower() == "reset":
             conversation_history.pop(sender, None)
@@ -332,4 +362,5 @@ def webhook():
 
 
 if __name__ == "__main__":
+    send_message(ADMIN_NUMBER, "✅ Bot started and ready!")
     app.run(host="0.0.0.0", port=5000)
