@@ -153,6 +153,20 @@ def ask_claude(sender: str, prompt: str) -> str | None:
     return reply
 
 
+def mark_as_read(message_id: str):
+    url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {ACCESS_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "status": "read",
+        "message_id": message_id,
+    }
+    requests.post(url, headers=headers, json=payload)
+
+
 def send_message(to: str, text: str):
     url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
 
@@ -204,6 +218,10 @@ def webhook():
 
         message = messages[0]
         sender = message.get("from")
+        message_id = message.get("id")
+
+        if message_id:
+            mark_as_read(message_id)
 
         if message.get("type") != "text":
             print(f"Skipping non-text message type: {message.get('type')}")
