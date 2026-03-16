@@ -1,6 +1,8 @@
 import os
+import re
 import sys
 import json
+import traceback
 import threading
 from pathlib import Path
 from collections import defaultdict
@@ -13,13 +15,18 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+REQUIRED_ENV_VARS = ["VERIFY_TOKEN", "ACCESS_TOKEN", "PHONE_NUMBER_ID", "ANTHROPIC_API_KEY"]
+missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v)]
+if missing:
+    sys.exit(f"Missing required env vars: {', '.join(missing)}")
+
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+ADMIN_NUMBER = os.getenv("ADMIN_NUMBER", "916380157944")
 
 MAX_HISTORY = 20
-ADMIN_NUMBER = "916380157944"
 
 client = Anthropic(api_key=ANTHROPIC_API_KEY)
 app = Flask(__name__)
@@ -36,12 +43,28 @@ LOGS_DIR = SCRIPT_DIR / "logs"
 LOGS_DIR.mkdir(exist_ok=True)
 
 USAGE_FILE = SCRIPT_DIR / "usage.json"
-USER_BUDGET = 10.0  # USD per user
+CONFIG_FILE = SCRIPT_DIR / "bot_config.json"
 ENABLE_USER_BUDGET = os.getenv("ENABLE_USER_BUDGET", "false").lower() == "true"
 
-# Claude Haiku 4.5 pricing
 INPUT_COST_PER_TOKEN  = 0.80 / 1_000_000
 OUTPUT_COST_PER_TOKEN = 4.00 / 1_000_000
+
+_usage_lock = threading.Lock()
+
+
+def load_config() -> dict:
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+
+def save_config(cfg: dict):
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+
+USER_BUDGET = load_config().get("user_budget", 10.0)
 
 
 def load_usage() -> dict:
@@ -57,18 +80,20 @@ def save_usage(usage: dict):
 
 
 def get_user_cost(sender: str) -> float:
-    usage = load_usage()
+    with _usage_lock:
+        usage = load_usage()
     u = usage.get(sender, {})
     return (u.get("input_tokens", 0) * INPUT_COST_PER_TOKEN
             + u.get("output_tokens", 0) * OUTPUT_COST_PER_TOKEN)
 
 
 def record_usage(sender: str, input_tokens: int, output_tokens: int):
-    usage = load_usage()
-    u = usage.setdefault(sender, {"input_tokens": 0, "output_tokens": 0})
-    u["input_tokens"]  += input_tokens
-    u["output_tokens"] += output_tokens
-    save_usage(usage)
+    with _usage_lock:
+        usage = load_usage()
+        u = usage.setdefault(sender, {"input_tokens": 0, "output_tokens": 0})
+        u["input_tokens"]  += input_tokens
+        u["output_tokens"] += output_tokens
+        save_usage(usage)
 
 
 def log_message(sender: str, role: str, text: str):
@@ -143,7 +168,7 @@ def ask_claude(sender: str, prompt: str) -> str | None:
 
     response = client.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=300,
+        max_tokens=600,
         system=SYSTEM_PROMPT,
         messages=history,
     )
@@ -158,7 +183,7 @@ def ask_claude(sender: str, prompt: str) -> str | None:
 
 
 def mark_as_read(message_id: str):
-    url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
+    url = f"https://graph.facebook.com/v21.0/{PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN}",
         "Content-Type": "application/json",
@@ -171,8 +196,21 @@ def mark_as_read(message_id: str):
     requests.post(url, headers=headers, json=payload)
 
 
+def sanitize_for_whatsapp(text: str) -> str:
+    text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
+    text = re.sub(r'__(.+?)__', r'_\1_', text)
+
+    text = re.sub(r'(?<=[^\s\n])\*(\S)', r' *\1', text)
+    text = re.sub(r'(\S)\*(?=[^\s\n*])', r'\1* ', text)
+
+    text = re.sub(r'#{1,6}\s+', '', text)
+    text = re.sub(r'^\[(.+?)\]\(.+?\)', r'\1', text, flags=re.MULTILINE)
+
+    return text
+
+
 def send_message(to: str, text: str):
-    url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
+    url = f"https://graph.facebook.com/v21.0/{PHONE_NUMBER_ID}/messages"
 
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN}",
@@ -183,48 +221,20 @@ def send_message(to: str, text: str):
         "messaging_product": "whatsapp",
         "to": to,
         "type": "text",
-        "text": {"body": text},
+        "text": {"body": sanitize_for_whatsapp(text)},
     }
 
     r = requests.post(url, headers=headers, json=payload)
     print("WhatsApp API response:", r.status_code, r.text)
 
 
-ADMIN_INTENT_PROMPT = """You are a command classifier for a WhatsApp bot admin.
-Given an admin message, identify the intent and respond in EXACTLY the format shown below. Nothing else.
+def handle_admin_command(text: str) -> str | None:
+    if not text.startswith("/"):
+        return None
 
-Intents:
-- reboot       → respond: reboot
-- stats / usage / how many users → respond: stats
-- clear all histories → respond: clearall
-- add a rule / add rule that / make the bot say / instruct the bot → respond: addrule: <extract the full rule text>
-- set budget / change budget → respond: setbudget: <amount>
-- admin help / show commands → respond: adminhelp
-- anything else → respond: none
-
-Examples:
-"can you reboot yourself" → reboot
-"how many users chatted so far" → stats
-"add rule that if someone asks X say Y" → addrule: if someone asks X say Y
-"make the bot always reply in Tamil" → addrule: always reply in Tamil
-"set user budget to 5" → setbudget: 5
-"what is 2+2" → none
-
-Only respond with the keyword or keyword: value. Nothing else."""
-
-
-def detect_admin_intent(text: str) -> str:
-    response = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=50,
-        system=ADMIN_INTENT_PROMPT,
-        messages=[{"role": "user", "content": text}],
-    )
-    return response.content[0].text.strip().lower()
-
-
-def handle_admin_command(cmd: str) -> str:
-    cmd = cmd.strip().lower()
+    parts = text[1:].split(None, 1)
+    cmd = parts[0].lower()
+    arg = parts[1].strip() if len(parts) > 1 else ""
 
     if cmd == "reboot":
         global _reboot_pending
@@ -252,40 +262,43 @@ def handle_admin_command(cmd: str) -> str:
         conversation_history.clear()
         return "🗑️ All conversation histories cleared."
 
-    if cmd.startswith("addrule:") or cmd.startswith("addrule "):
-        new_rule = cmd[len("addrule"):].lstrip(": ").strip()
-        if not new_rule:
-            return "Usage: addrule <rule text>"
+    if cmd == "addrule":
+        if not arg:
+            return "Usage: /addrule <rule text>"
+        if len(arg) > 500:
+            return "❌ Rule too long (max 500 chars)."
         prompt_file = SCRIPT_DIR / "system_prompt.txt"
         with open(prompt_file, "a", encoding="utf-8") as f:
-            f.write(f"\n- {new_rule}")
+            f.write(f"\n- {arg}")
         global SYSTEM_PROMPT
         SYSTEM_PROMPT = load_system_prompt()
-        return f"✅ Rule added: {new_rule}"
+        return f"✅ Rule added: {arg}"
 
-    if cmd.startswith("setbudget:") or cmd.startswith("setbudget "):
-        parts = cmd[len("setbudget"):].lstrip(": ").strip().split()
-        if len(parts) != 1:
-            return "Usage: setbudget <amount>"
+    if cmd == "setbudget":
+        if not arg:
+            return "Usage: /setbudget <amount>"
         try:
             global USER_BUDGET
-            USER_BUDGET = float(parts[0])
+            USER_BUDGET = float(arg)
+            cfg = load_config()
+            cfg["user_budget"] = USER_BUDGET
+            save_config(cfg)
             return f"✅ User budget set to ${USER_BUDGET:.2f}"
         except ValueError:
             return "❌ Invalid amount."
 
-    if cmd == "adminhelp":
+    if cmd == "help":
         return (
             "🔧 *Admin Commands*\n\n"
-            "• *reboot* — restart the bot\n"
-            "• *stats* — show usage & cost per user\n"
-            "• *clearall* — clear all conversation histories\n"
-            "• *addrule <text>* — append a rule to system prompt\n"
-            "• *setbudget <amount>* — change per-user USD budget\n"
-            "• *adminhelp* — show this menu"
+            "• */reboot* — restart the bot\n"
+            "• */stats* — show usage & cost per user\n"
+            "• */clearall* — clear all conversation histories\n"
+            "• */addrule <text>* — append a rule to system prompt\n"
+            "• */setbudget <amount>* — change per-user USD budget\n"
+            "• */help* — show this menu"
         )
 
-    return None  # not an admin command
+    return None
 
 
 @app.route("/webhook", methods=["GET"])
@@ -326,7 +339,7 @@ def webhook():
             mark_as_read(message_id)
 
         if message.get("type") != "text":
-            print(f"Skipping non-text message type: {message.get('type')}")
+            send_message(sender, "📝 I can only read text messages for now. Please send your question as text!")
             return "ok", 200
 
         user_text = message["text"]["body"]
@@ -334,13 +347,11 @@ def webhook():
         print(f"User: {sender}")
         print(f"Message: {user_text}")
 
-        if sender == ADMIN_NUMBER:
-            intent = detect_admin_intent(user_text)
-            if intent != "none":
-                admin_reply = handle_admin_command(intent)
-                if admin_reply is not None:
-                    send_message(sender, admin_reply)
-                    return "ok", 200
+        if sender == ADMIN_NUMBER and user_text.strip().startswith("/"):
+            admin_reply = handle_admin_command(user_text.strip())
+            if admin_reply is not None:
+                send_message(sender, admin_reply)
+                return "ok", 200
 
         if user_text.strip().lower() == "reset":
             conversation_history.pop(sender, None)
@@ -358,7 +369,7 @@ def webhook():
 
         ai_reply = ask_claude(sender, user_text)
         if ai_reply is None:
-            send_message(sender, "⚠️ You've reached the $10 usage limit for this bot. Contact Aswin if you'd like to continue.")
+            send_message(sender, f"⚠️ You've reached the ${USER_BUDGET:.0f} usage limit for this bot. Contact Aswin if you'd like to continue.")
             return "ok", 200
 
         print(f"Claude reply: {ai_reply}")
@@ -366,6 +377,7 @@ def webhook():
 
     except Exception as e:
         print(f"Error processing webhook: {e}")
+        traceback.print_exc()
 
     return "ok", 200
 
