@@ -31,7 +31,6 @@
 | ⚡ **Quick Replies** | Instant responses for common keywords (`hi`, `help`, `about`, `bye`, etc.) |
 | 🔄 **Conversation Reset** | Users can type `reset` to start a fresh session |
 | 💰 **Budget Control** | Optional per-user spending cap (default: $10 USD) |
-| 📋 **Message Logging** | Automatic per-user log files for all conversations |
 | 🔒 **Webhook Verification** | Secure Meta webhook handshake with a verify token |
 | 🌐 **REST Webhook** | Clean Flask endpoints for `GET` (verify) and `POST` (messages) |
 
@@ -54,9 +53,7 @@ whatsapp_bot/
 ├── bot.py              # Main application — Flask app, webhook handler, Claude integration
 ├── system_prompt.txt   # Personality & rules for the AI assistant
 ├── requirements.txt    # Python dependencies
-├── .gitignore
-└── logs/               # Auto-created — per-user conversation logs
-    └── <phone>.log
+└── .gitignore
 ```
 
 ---
@@ -68,7 +65,7 @@ whatsapp_bot/
 - Python 3.10 or higher
 - A [Meta Developer account](https://developers.facebook.com/) with a WhatsApp Business App
 - An [Anthropic API key](https://console.anthropic.com/)
-- A public HTTPS URL for your webhook (e.g. via [ngrok](https://ngrok.com) for local dev)
+- A public HTTPS URL for your webhook (e.g. via [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) for local dev)
 
 ### 2. Clone the Repository
 
@@ -103,7 +100,31 @@ ENABLE_USER_BUDGET=false
 python bot.py
 ```
 
-The server starts on `http://0.0.0.0:5000`. Expose it publicly (e.g. with ngrok) and register `https://<your-domain>/webhook` as your WhatsApp webhook URL.
+The server starts on `http://0.0.0.0:5000`. Expose it publicly using Cloudflare Tunnel and register the resulting HTTPS URL as your WhatsApp webhook.
+
+**Using Cloudflare Tunnel (recommended):**
+
+1. Install `cloudflared`:
+   ```bash
+   # macOS
+   brew install cloudflare/cloudflare/cloudflared
+
+   # Linux
+   curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+   chmod +x cloudflared && sudo mv cloudflared /usr/local/bin/
+   ```
+
+2. Start a quick tunnel (no account needed for local dev):
+   ```bash
+   cloudflared tunnel --url http://localhost:5000
+   ```
+
+3. Copy the generated `https://<random>.trycloudflare.com` URL and set it as your webhook:
+   ```
+   https://<random>.trycloudflare.com/webhook
+   ```
+
+> For a stable permanent URL, [create a named tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/) with a free Cloudflare account.
 
 ---
 
@@ -156,7 +177,7 @@ User sends WhatsApp message
 2. **Message Routing** — Incoming `POST /webhook` payloads are parsed to extract the sender and message text.
 3. **Quick Replies** — If the message matches a known keyword, a pre-defined response is returned instantly.
 4. **AI Responses** — All other messages are forwarded to Claude Haiku with the full conversation history (up to the last 20 turns) and the configured system prompt.
-5. **Logging & Budget** — Every message is appended to a per-user log file. If `ENABLE_USER_BUDGET=true`, the bot tracks token usage and stops responding once a user hits the $10 cap.
+5. **Budget** — If `ENABLE_USER_BUDGET=true`, the bot tracks token usage per user and stops responding once they hit the $10 cap.
 
 ---
 
