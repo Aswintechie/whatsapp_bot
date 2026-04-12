@@ -1,6 +1,8 @@
 .env
-logs/
 usage.json
 bot_config.json
+system_prompt.txt
 __pycache__/
 *.pyc
+*.pyo
+.DS_Store
