@@ -2,7 +2,7 @@ import os
 import re
 import sys
 import json
-import traceback
+import logging
 import threading
 from pathlib import Path
 from collections import defaultdict
@@ -14,7 +14,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-REQUIRED_ENV_VARS = ["VERIFY_TOKEN", "ACCESS_TOKEN", "PHONE_NUMBER_ID", "ANTHROPIC_API_KEY"]
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+REQUIRED_ENV_VARS = ["VERIFY_TOKEN", "ACCESS_TOKEN", "PHONE_NUMBER_ID", "ANTHROPIC_API_KEY", "ADMIN_NUMBER"]
 missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v)]
 if missing:
     sys.exit(f"Missing required env vars: {', '.join(missing)}")
@@ -23,7 +30,7 @@ VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-ADMIN_NUMBER = os.getenv("ADMIN_NUMBER", "916380157944")
+ADMIN_NUMBER = os.getenv("ADMIN_NUMBER")
 
 MAX_HISTORY = 20
 
@@ -31,12 +38,6 @@ client = Anthropic(api_key=ANTHROPIC_API_KEY)
 app = Flask(__name__)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-
-def load_system_prompt():
-    with open(SCRIPT_DIR / "system_prompt.txt", "r") as f:
-        return f.read()
-
-SYSTEM_PROMPT = load_system_prompt()
 
 USAGE_FILE = SCRIPT_DIR / "usage.json"
 CONFIG_FILE = SCRIPT_DIR / "bot_config.json"
@@ -46,6 +47,16 @@ INPUT_COST_PER_TOKEN  = 0.80 / 1_000_000
 OUTPUT_COST_PER_TOKEN = 4.00 / 1_000_000
 
 _usage_lock = threading.Lock()
+
+
+def load_system_prompt() -> str:
+    prompt_file = SCRIPT_DIR / "system_prompt.txt"
+    if prompt_file.exists():
+        return prompt_file.read_text(encoding="utf-8")
+    from_env = os.getenv("SYSTEM_PROMPT")
+    if from_env:
+        return from_env
+    return "You are a helpful WhatsApp assistant."
 
 
 def load_config() -> dict:
@@ -60,6 +71,7 @@ def save_config(cfg: dict):
         json.dump(cfg, f, indent=2)
 
 
+SYSTEM_PROMPT = load_system_prompt()
 USER_BUDGET = load_config().get("user_budget", 10.0)
 
 
@@ -197,21 +209,18 @@ def sanitize_for_whatsapp(text: str) -> str:
 
 def send_message(to: str, text: str):
     url = f"https://graph.facebook.com/v21.0/{PHONE_NUMBER_ID}/messages"
-
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN}",
         "Content-Type": "application/json",
     }
-
     payload = {
         "messaging_product": "whatsapp",
         "to": to,
         "type": "text",
         "text": {"body": sanitize_for_whatsapp(text)},
     }
-
     r = requests.post(url, headers=headers, json=payload)
-    print("WhatsApp API response:", r.status_code, r.text)
+    logger.info("WhatsApp API response: %s", r.status_code)
 
 
 def handle_admin_command(text: str) -> str | None:
@@ -329,9 +338,7 @@ def webhook():
             return "ok", 200
 
         user_text = message["text"]["body"]
-
-        print(f"User: {sender}")
-        print(f"Message: {user_text}")
+        logger.info("Message from %s: %s", sender, user_text)
 
         if sender == ADMIN_NUMBER and user_text.strip().startswith("/"):
             admin_reply = handle_admin_command(user_text.strip())
@@ -356,12 +363,11 @@ def webhook():
             send_message(sender, f"⚠️ You've reached the ${USER_BUDGET:.0f} usage limit for this bot. Contact Aswin if you'd like to continue.")
             return "ok", 200
 
-        print(f"Claude reply: {ai_reply}")
+        logger.info("Reply to %s: %s", sender, ai_reply[:80])
         send_message(sender, ai_reply)
 
     except Exception as e:
-        print(f"Error processing webhook: {e}")
-        traceback.print_exc()
+        logger.exception("Error processing webhook: %s", e)
 
     return "ok", 200
 

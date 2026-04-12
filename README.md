@@ -10,7 +10,7 @@
 [![WhatsApp](https://img.shields.io/badge/WhatsApp-Business_API-25D366?logo=whatsapp&logoColor=white)](https://developers.facebook.com/docs/whatsapp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[Features](#-features) · [Tech Stack](#-tech-stack) · [Setup](#-setup) · [Configuration](#-configuration) · [Usage](#-usage) · [How It Works](#-how-it-works)
+[Features](#-features) · [Tech Stack](#-tech-stack) · [Setup](#-setup) · [Docker](#-docker) · [Configuration](#-configuration) · [Usage](#-usage) · [How It Works](#-how-it-works)
 
 </div>
 
@@ -33,13 +33,14 @@
 | 💰 **Budget Control** | Optional per-user spending cap (default: $10 USD) |
 | 🔒 **Webhook Verification** | Secure Meta webhook handshake with a verify token |
 | 🌐 **REST Webhook** | Clean Flask endpoints for `GET` (verify) and `POST` (messages) |
+| 🐳 **Docker Ready** | Single-command deployment with Gunicorn WSGI server |
 
 ---
 
 ## 🛠 Tech Stack
 
 - **[Python 3.10+](https://python.org)** — Core language
-- **[Flask](https://flask.palletsprojects.com)** — Lightweight web framework for the webhook server
+- **[Flask](https://flask.palletsprojects.com)** + **[Gunicorn](https://gunicorn.org)** — Web framework + production WSGI server
 - **[Anthropic SDK](https://github.com/anthropics/anthropic-sdk-python)** — Claude AI integration
 - **[WhatsApp Business API](https://developers.facebook.com/docs/whatsapp)** — Meta's messaging platform
 - **[python-dotenv](https://github.com/theskumar/python-dotenv)** — Environment variable management
@@ -51,9 +52,12 @@
 ```
 whatsapp_bot/
 ├── bot.py              # Main application — Flask app, webhook handler, Claude integration
-├── system_prompt.txt   # Personality & rules for the AI assistant
+├── system_prompt.txt   # (gitignored) Personality & rules for the AI — create from example
+├── system_prompt.txt.example  # Template for the system prompt
+├── .env.example        # Template for environment variables
 ├── requirements.txt    # Python dependencies
-└── .gitignore
+├── Dockerfile          # Container build
+└── LICENSE
 ```
 
 ---
@@ -62,47 +66,62 @@ whatsapp_bot/
 
 ### 1. Prerequisites
 
-- Python 3.10 or higher
+- Python 3.10 or higher (or Docker)
 - A [Meta Developer account](https://developers.facebook.com/) with a WhatsApp Business App
 - An [Anthropic API key](https://console.anthropic.com/)
-- A public HTTPS URL for your webhook (e.g. via [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) for local dev)
+- A public HTTPS URL for your webhook (see [Cloudflare Tunnel](#exposing-locally-with-cloudflare-tunnel) below)
 
-### 2. Clone the Repository
+### 2. Clone & Install
 
 ```bash
 git clone https://github.com/Aswintechie/whatsapp_bot.git
 cd whatsapp_bot
-```
-
-### 3. Install Dependencies
-
-```bash
 pip install -r requirements.txt
 ```
 
-### 4. Configure Environment Variables
+### 3. Configure Environment Variables
 
-Create a `.env` file in the project root:
+```bash
+cp .env.example .env
+# Edit .env and fill in your values
+```
 
-```env
-VERIFY_TOKEN=your_webhook_verify_token
-ACCESS_TOKEN=your_whatsapp_access_token
-PHONE_NUMBER_ID=your_phone_number_id
-ANTHROPIC_API_KEY=your_anthropic_api_key
+### 4. Add Your System Prompt
 
-# Optional: enable per-user $10 spending cap
-ENABLE_USER_BUDGET=false
+```bash
+cp system_prompt.txt.example system_prompt.txt
+# Edit system_prompt.txt to define the bot's personality and rules
 ```
 
 ### 5. Run the Bot
 
+**Development:**
 ```bash
 python bot.py
 ```
 
-The server starts on `http://0.0.0.0:5000`. Expose it publicly using Cloudflare Tunnel and register the resulting HTTPS URL as your WhatsApp webhook.
+**Production (recommended):**
+```bash
+gunicorn --bind 0.0.0.0:5000 --workers 2 --timeout 60 bot:app
+```
 
-**Using Cloudflare Tunnel (recommended):**
+---
+
+## 🐳 Docker
+
+```bash
+# Build
+docker build -t aswinbot .
+
+# Run
+docker run -d --env-file .env \
+  -v $(pwd)/system_prompt.txt:/app/system_prompt.txt:ro \
+  -p 5000:5000 aswinbot
+```
+
+---
+
+## 🌐 Exposing Locally with Cloudflare Tunnel
 
 1. Install `cloudflared`:
    ```bash
@@ -114,12 +133,12 @@ The server starts on `http://0.0.0.0:5000`. Expose it publicly using Cloudflare 
    chmod +x cloudflared && sudo mv cloudflared /usr/local/bin/
    ```
 
-2. Start a quick tunnel (no account needed for local dev):
+2. Start a quick tunnel (no account needed):
    ```bash
    cloudflared tunnel --url http://localhost:5000
    ```
 
-3. Copy the generated `https://<random>.trycloudflare.com` URL and set it as your webhook:
+3. Copy the generated `https://<random>.trycloudflare.com` URL and register:
    ```
    https://<random>.trycloudflare.com/webhook
    ```
@@ -136,13 +155,17 @@ The server starts on `http://0.0.0.0:5000`. Expose it publicly using Cloudflare 
 | `ACCESS_TOKEN` | ✅ | — | WhatsApp Business API access token |
 | `PHONE_NUMBER_ID` | ✅ | — | Your WhatsApp Business phone number ID |
 | `ANTHROPIC_API_KEY` | ✅ | — | API key from [console.anthropic.com](https://console.anthropic.com) |
+| `ADMIN_NUMBER` | ✅ | — | Phone number (no `+`) allowed to run admin `/commands` |
 | `ENABLE_USER_BUDGET` | ❌ | `false` | Set to `true` to limit each user to $10 of API usage |
+| `SYSTEM_PROMPT` | ❌ | — | Inline system prompt (fallback if `system_prompt.txt` is absent) |
+
+See `.env.example` for a full template.
 
 ---
 
 ## 💬 Usage
 
-Once running, users can chat with the bot on WhatsApp using any of these built-in commands:
+Once running, users can chat with the bot on WhatsApp:
 
 | Command | Response |
 |---|---|
@@ -154,6 +177,17 @@ Once running, users can chat with the bot on WhatsApp using any of these built-i
 | `thanks` / `thank you` | Polite acknowledgement |
 | *anything else* | Sent to Claude AI for an intelligent reply |
 
+### Admin Commands (ADMIN_NUMBER only)
+
+| Command | Description |
+|---|---|
+| `/help` | Show admin command list |
+| `/stats` | Show per-user token usage and cost |
+| `/clearall` | Clear all conversation histories |
+| `/addrule <text>` | Append a rule to `system_prompt.txt` |
+| `/setbudget <amount>` | Change per-user USD budget |
+| `/reboot` | Restart the bot process |
+
 ---
 
 ## 🔍 How It Works
@@ -162,7 +196,9 @@ Once running, users can chat with the bot on WhatsApp using any of these built-i
 User sends WhatsApp message
         │
         ▼
-  POST /webhook  (Flask)
+  POST /webhook  (Flask + Gunicorn)
+        │
+        ├──► Admin command? ──► Execute and reply
         │
         ├──► Keyword match? ──► Send quick reply
         │
