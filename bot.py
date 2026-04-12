@@ -6,7 +6,6 @@ import traceback
 import threading
 from pathlib import Path
 from collections import defaultdict
-from datetime import datetime
 
 import requests
 from flask import Flask, request
@@ -38,9 +37,6 @@ def load_system_prompt():
         return f.read()
 
 SYSTEM_PROMPT = load_system_prompt()
-
-LOGS_DIR = SCRIPT_DIR / "logs"
-LOGS_DIR.mkdir(exist_ok=True)
 
 USAGE_FILE = SCRIPT_DIR / "usage.json"
 CONFIG_FILE = SCRIPT_DIR / "bot_config.json"
@@ -95,12 +91,6 @@ def record_usage(sender: str, input_tokens: int, output_tokens: int):
         u["output_tokens"] += output_tokens
         save_usage(usage)
 
-
-def log_message(sender: str, role: str, text: str):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log_file = LOGS_DIR / f"{sender}.log"
-    with open(log_file, "a", encoding="utf-8") as f:
-        f.write(f"[{timestamp}] [{role}] {text}\n")
 
 conversation_history: dict[str, list[dict]] = defaultdict(list)
 _reboot_pending = False
@@ -158,8 +148,6 @@ def ask_claude(sender: str, prompt: str) -> str | None:
     if ENABLE_USER_BUDGET and get_user_cost(sender) >= USER_BUDGET:
         return None  # budget exceeded
 
-    log_message(sender, "user", prompt)
-
     history = conversation_history[sender]
     history.append({"role": "user", "content": prompt})
 
@@ -177,8 +165,6 @@ def ask_claude(sender: str, prompt: str) -> str | None:
 
     reply = response.content[0].text
     history.append({"role": "assistant", "content": reply})
-
-    log_message(sender, "bot", reply)
     return reply
 
 
@@ -360,8 +346,6 @@ def webhook():
 
         quick = get_quick_reply(user_text)
         if quick:
-            log_message(sender, "user", user_text)
-            log_message(sender, "bot", quick)
             if user_text.strip().lower() == "bye":
                 conversation_history.pop(sender, None)
             send_message(sender, quick)
